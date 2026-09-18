@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Fauna Window v0.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Epilogue:wght@300;500&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#1d2a26; --ink:#e9e4f2; --dim:rgba(233,228,242,.6); --red:#ff2a1f; }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --bg:#1d2a26; } }
+  :root[data-theme="dark"]{ --bg:#1d2a26; }
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
+    font-family:Epilogue, system-ui, -apple-system, sans-serif;touch-action:none;
+    -webkit-user-select:none;user-select:none;}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;image-rendering:pixelated;display:block}
+  #gate{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:1.4rem;background:radial-gradient(ellipse at 50% 60%, #6b5a86 0%, #2b3b35 55%, #141c19 100%);
+    text-align:center;padding:2rem;cursor:pointer;z-index:2}
+  #gate .dot{width:14px;height:14px;border-radius:50%;background:var(--red);box-shadow:0 0 24px var(--red)}
+  #gate p{margin:0;font-weight:300;font-size:1.05rem;line-height:1.6;max-width:22rem;color:var(--dim)}
+  #gate strong{display:block;font-weight:500;font-size:1.4rem;color:var(--ink);margin-bottom:.4rem}
+  #hud{position:fixed;left:0;right:0;bottom:max(1rem, env(safe-area-inset-bottom));display:none;
+    justify-content:center;gap:.6rem;z-index:1}
+  #hud button{font:500 .85rem Epilogue, system-ui, sans-serif;color:var(--ink);background:rgba(20,28,25,.55);
+    border:1px solid rgba(233,228,242,.25);padding:.55rem .9rem;border-radius:999px;backdrop-filter:blur(6px)}
+  #hud button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  #msg{position:fixed;top:max(1rem, env(safe-area-inset-top));left:0;right:0;text-align:center;
+    font-size:.85rem;color:var(--dim);z-index:1;pointer-events:none;transition:opacity 1s}
+</style>
+</head>
+<body>
+<div id="gate" role="button" tabindex="0">
+  <div class="dot" aria-hidden="true"></div>
+  <p><strong>Tap to enter</strong>Hold your phone up like a window. Turn your body to look around. Follow the red dot.</p>
+</div>
+<div id="msg"></div>
+<div id="hud">
+  <button id="recenter">Face the dot</button>
+  <button id="pause">Pause</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+// ---------- setup ----------
+const PIX = 3;                       // chunky pixel scale (PS1 look)
+const renderer = new THREE.WebGLRenderer({ antialias:false });
+renderer.setPixelRatio(1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, 1, 0.1, 400);
+camera.rotation.order = 'YXZ';
+
+// Low-res render target + dither pass
+let rt;
+const post = new THREE.Scene();
+const postCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const postMat = new THREE.ShaderMaterial({
+  uniforms:{ tex:{value:null}, levels:{value:7.0} },
+  vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`,
+  fragmentShader:`
+    uniform sampler2D tex; uniform float levels; varying vec2 vUv;
+    float b2(vec2 a){ a=floor(a); return fract(dot(a, vec2(.5, a.y*.75))); }
+    float b4(vec2 a){ return b2(.5*a)*.25 + b2(a); }
+    void main(){
+      vec3 c = texture2D(tex, vUv).rgb;
+      float d = b4(gl_FragCoord.xy);
+      c = floor(c*levels + d) / levels;
+      gl_FragColor = vec4(c,1.);
+    }`
+});
+post.add(new THREE.Mesh(new THREE.PlaneBufferGeometry(2,2), postMat));
+
+function resize(){
+  const w = Math.max(1, Math.floor(innerWidth/PIX)), h = Math.max(1, Math.floor(innerHeight/PIX));
+  renderer.setSize(w, h, false);
+  if (rt) rt.dispose();
+  rt = new THREE.WebGLRenderTarget(w, h, { minFilter:THREE.NearestFilter, magFilter:THREE.NearestFilter });
+  postMat.uniforms.tex.value = rt.texture;
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+// ---------- palettes (picked by moon phase, a nod to the lunar calendar) ----------
+const PALETTES = [
+  { sky:0x8f7fae, fog:0x8f7fae, low:0x3f6b55, high:0xc9d6a3, tree:0x5e8f6a, sun:0xfff1a8, dust:0xf6e36b }, // lilac + mould green
+  { sky:0xd98a8f, fog:0xd98a8f, low:0x7a3b4a, high:0xf2c4b8, tree:0xb85a74, sun:0xfff4e0, dust:0xffffff }, // rose forest
+  { sky:0x2a1a1a, fog:0x3a1212, low:0x5a0f12, high:0xa3322b, tree:0x1c0808, sun:0x3a3030, dust:0xff9d7a }, // blood red
+  { sky:0x9cc3c9, fog:0x9cc3c9, low:0x2f4e5c, high:0xe4efe6, tree:0x406f76, sun:0xffffff, dust:0xd9f2ff }  // cold morning
+];
+function moonPhaseIndex(d = new Date()){
+  const synodic = 29.530588853, ref = Date.UTC(2000,0,6,18,14);
+  const age = ((d - ref)/864e5 % synodic + synodic) % synodic;
+  return Math.floor(age / synodic * PALETTES.length) % PALETTES.length;
+}
+let palIndex = moonPhaseIndex();
+
+// ---------- noise terrain ----------
+function hash(x,z){ const s = Math.sin(x*127.1 + z*311.7)*43758.5453; return s - Math.floor(s); }
+function vnoise(x,z){
+  const xi=Math.floor(x), zi=Math.floor(z), xf=x-xi, zf=z-zi;
+  const u=xf*xf*(3-2*xf), v=zf*zf*(3-2*zf);
+  const a=hash(xi,zi), b=hash(xi+1,zi), c=hash(xi,zi+1), d=hash(xi+1,zi+1);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;
+}
+function heightAt(x,z){
+  let h=0, amp=18, f=0.012;
+  for(let i=0;i<4;i++){ h += (vnoise(x*f, z*f)-.5)*amp; amp*=.45; f*=2.1; }
+  return h;
+}
+
+const SIZE=320, SEG=64, STEP=SIZE/SEG;
+const terrGeo = new THREE.PlaneBufferGeometry(SIZE, SIZE, SEG, SEG).rotateX(-Math.PI/2).toNonIndexed();
+terrGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(terrGeo.attributes.position.count*3), 3));
+const basePos = terrGeo.attributes.position.array.slice();
+const terrMat = new THREE.MeshPhongMaterial({ vertexColors:true, flatShading:true, shininess:0 });
+const terrain = new THREE.Mesh(terrGeo, terrMat);
+scene.add(terrain);
+let lastCell = null;
+const cLow = new THREE.Color(), cHigh = new THREE.Color(), cTmp = new THREE.Color();
+function rebuildTerrain(cx, cz, force){
+  const key = cx+','+cz;
+  if (!force && key === lastCell) return;
+  lastCell = key;
+  terrain.position.set(cx*STEP, 0, cz*STEP);
+  const p = terrGeo.attributes.position.array, col = terrGeo.attributes.color.array;
+  for (let i=0;i<p.length;i+=3){
+    const wx = basePos[i] + cx*STEP, wz = basePos[i+2] + cz*STEP;
+    const h = heightAt(wx, wz);
+    p[i+1] = h;
+    const t = THREE.MathUtils.clamp((h+10)/22, 0, 1) + (hash(wx,wz)-.5)*.12;
+    cTmp.copy(cLow).lerp(cHigh, THREE.MathUtils.clamp(t,0,1));
+    col[i]=cTmp.r; col[i+1]=cTmp.g; col[i+2]=cTmp.b;
+  }
+  terrGeo.attributes.position.needsUpdate = true;
+  terrGeo.attributes.color.needsUpdate = true;
+  terrGeo.computeVertexNormals();
+}
+
+// ---------- trees, dust, sun, red dot ----------
+const treeMat = new THREE.MeshPhongMaterial({ flatShading:true, shininess:0 });
+const trees = [];
+const treeGeo = new THREE.ConeBufferGeometry(1, 1, 5);
+for (let i=0;i<110;i++){
+  const m = new THREE.Mesh(treeGeo, treeMat);
+  m.userData.s = 3 + Math.random()*9;
+  m.scale.set(m.userData.s*.28, m.userData.s, m.userData.s*.28);
+  scene.add(m); trees.push(m);
+}
+const R = 150;
+function wrap(v, c){ return c + ((((v - c + R) % (2*R)) + 2*R) % (2*R)) - R; }
+function scatterTrees(){ trees.forEach(t => { t.position.x = camera.position.x + (Math.random()*2-1)*R; t.position.z = camera.position.z + (Math.random()*2-1)*R; }); }
+
+const DUST = 600;
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(DUST*3), 3));
+const dustMat = new THREE.PointsMaterial({ size:.6, sizeAttenuation:true });
+const dust = new THREE.Points(dustGeo, dustMat); scene.add(dust);
+(function(){ const a=dustGeo.attributes.position.array; for(let i=0;i<a.length;i++) a[i]=(Math.random()*2-1)*60; })();
+
+const sun = new THREE.Mesh(new THREE.IcosahedronBufferGeometry(18,1), new THREE.MeshBasicMaterial({ fog:false }));
+scene.add(sun);
+
+const dot = new THREE.Mesh(new THREE.SphereBufferGeometry(.9, 8, 6), new THREE.MeshBasicMaterial({ color:0xff2a1f, fog:false }));
+scene.add(dot);
+function placeDot(){
+  const ang = Math.random()*Math.PI*2, dist = 70 + Math.random()*50;
+  dot.position.set(camera.position.x + Math.cos(ang)*dist, 0, camera.position.z + Math.sin(ang)*dist);
+}
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x333333, .75); scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, .6); dir.position.set(1,2,.5); scene.add(dir);
+
+function applyPalette(i){
+  const P = PALETTES[i];
+  scene.background = new THREE.Color(P.sky);
+  scene.fog = new THREE.Fog(P.fog, 20, 150);
+  cLow.set(P.low); cHigh.set(P.high);
+  treeMat.color.set(P.tree); dustMat.color.set(P.dust); sun.material.color.set(P.sun);
+  rebuildTerrain(0,0,true); lastCell=null;
+}
+applyPalette(palIndex);
+
+// ---------- orientation / look controls ----------
+const zee = new THREE.Vector3(0,0,1), yAxis = new THREE.Vector3(0,1,0);
+const qBack = new THREE.Quaternion(-Math.sqrt(.5),0,0,Math.sqrt(.5));
+const euler = new THREE.Euler(), qScreen = new THREE.Quaternion(), qYaw = new THREE.Quaternion();
+let orient = null, yawOffset = 0, gyroOn = false;
+const qTarget = new THREE.Quaternion();
+
+function screenAngle(){
+  return THREE.MathUtils.degToRad((screen.orientation && screen.orientation.angle) || window.orientation || 0);
+}
+function onOrient(e){
+  if (e.alpha == null) return;
+  orient = e; gyroOn = true;
+}
+function gyroQuat(out){
+  const a = THREE.MathUtils.degToRad(orient.alpha), b = THREE.MathUtils.degToRad(orient.beta), g = THREE.MathUtils.degToRad(orient.gamma);
+  euler.set(b, a, -g, 'YXZ');
+  out.setFromEuler(euler).multiply(qBack).multiply(qScreen.setFromAxisAngle(zee, -screenAngle()));
+  qYaw.setFromAxisAngle(yAxis, -yawOffset);
+  return out.premultiply(qYaw);
+}
+function faceDot(){
+  const dx = dot.position.x - camera.position.x, dz = dot.position.z - camera.position.z;
+  const want = Math.atan2(-dx, -dz);
+  if (!orient) { dragYaw = -want; dragPitch = 0; return; }
+  yawOffset = 0;
+  const f = new THREE.Vector3(0,0,-1).applyQuaternion(gyroQuat(new THREE.Quaternion()));
+  yawOffset = Math.atan2(-f.x, -f.z) - want;
+}
+
+// drag fallback (desktop / motion denied)
+let dragYaw = 0, dragPitch = 0, dragging = false, lx = 0, ly = 0;
+addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; });
+addEventListener('pointerup', () => dragging = false);
+addEventListener('pointercancel', () => dragging = false);
+addEventListener('pointermove', e => {
+  if (!dragging || gyroOn) return;
+  dragYaw += (e.clientX - lx) * .005; dragPitch += (e.clientY - ly) * .004;
+  dragPitch = THREE.MathUtils.clamp(dragPitch, -1.2, 1.2);
+  lx = e.clientX; ly = e.clientY;
+});
+
+// ---------- UI ----------
+const gate = document.getElementById('gate'), hud = document.getElementById('hud'), msg = document.getElementById('msg');
+let running = false, paused = false, heading = 0;
+function say(t, ms=3500){ msg.textContent = t; msg.style.opacity = 1; clearTimeout(say.t); say.t = setTimeout(()=>msg.style.opacity=0, ms); }
+
+let motionErr = '';
+async function start(){
+  gate.style.display = 'none'; hud.style.display = 'flex';
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+      const r = await DeviceOrientationEvent.requestPermission();
+      if (r !== 'granted') throw new Error('permission ' + r);
+    }
+    addEventListener('deviceorientation', onOrient);
+  } catch(err){ motionErr = err && err.message ? err.message : String(err); }
+  setTimeout(() => { if (!gyroOn) say('Motion access is off' + (motionErr ? ' (' + motionErr + ')' : ' (no sensor events)') + '. Drag to look around instead.', 8000); else faceDot(); }, 1200);
+  camera.position.set(0, heightAt(0,0)+6, 0);
+  scatterTrees(); placeDot();
+  running = true; last = performance.now(); requestAnimationFrame(loop);
+}
+gate.addEventListener('click', start);
+gate.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') start(); });
+document.getElementById('recenter').onclick = e => { e.stopPropagation(); faceDot(); };
+document.getElementById('pause').onclick = e => { e.stopPropagation(); paused = !paused; e.target.textContent = paused ? 'Resume' : 'Pause'; };
+
+// ---------- loop ----------
+const fwd = new THREE.Vector3();
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const SPEED = reduce ? 3 : 6;
+let last = 0, t = 0;
+
+function loop(now){
+  if (!running) return;
+  const dt = Math.min(.05, (now - last)/1000); last = now; t += dt;
+
+  // look
+  if (gyroOn && orient){ gyroQuat(qTarget); camera.quaternion.slerp(qTarget, .35); }
+  else { camera.rotation.set(-dragPitch, -dragYaw, 0); }
+
+  // auto-forward along horizontal look direction
+  camera.getWorldDirection(fwd); fwd.y = 0;
+  if (fwd.lengthSq() > 1e-4){ fwd.normalize(); heading = Math.atan2(-fwd.x, -fwd.z); }
+  if (!paused){ camera.position.x += fwd.x*SPEED*dt; camera.position.z += fwd.z*SPEED*dt; }
+  const groundY = heightAt(camera.position.x, camera.position.z) + 6;
+  camera.position.y += (groundY - camera.position.y) * Math.min(1, dt*2);
+
+  // terrain follows camera in grid steps
+  rebuildTerrain(Math.round(camera.position.x/STEP), Math.round(camera.position.z/STEP));
+
+  // wrap trees + dust around the camera
+  for (const tr of trees){
+    tr.position.x = wrap(tr.position.x, camera.position.x);
+    tr.position.z = wrap(tr.position.z, camera.position.z);
+    tr.position.y = heightAt(tr.position.x, tr.position.z) + tr.userData.s*.45;
+  }
+  const d = dustGeo.attributes.position.array;
+  for (let i=0;i<d.length;i+=3){
+    d[i+1] += Math.sin(t*.7 + i)*.01;
+    d[i]   = camera.position.x + ((((d[i]-camera.position.x)+60)%120+120)%120) - 60;
+    d[i+2] = camera.position.z + ((((d[i+2]-camera.position.z)+60)%120+120)%120) - 60;
+    if (Math.abs(d[i+1]-camera.position.y) > 40) d[i+1] = camera.position.y + (Math.random()*2-1)*30;
+  }
+  dustGeo.attributes.position.needsUpdate = true;
+
+  // sun stays far on the horizon
+  sun.position.set(camera.position.x + 260, camera.position.y + 40, camera.position.z - 260);
+
+  // red dot bobs; reach it to jump to the next world
+  dot.position.y = heightAt(dot.position.x, dot.position.z) + 5 + Math.sin(t*2)*1.2;
+  const dx = dot.position.x - camera.position.x, dz = dot.position.z - camera.position.z;
+  if (dx*dx + dz*dz < 36){ palIndex = (palIndex+1) % PALETTES.length; applyPalette(palIndex); placeDot(); say('A new world.'); }
+  if (dx*dx + dz*dz > 200*200) placeDot();
+
+  // render low-res, then dither to screen
+  renderer.setRenderTarget(rt); renderer.render(scene, camera);
+  renderer.setRenderTarget(null); renderer.render(post, postCam);
+  requestAnimationFrame(loop);
+}
+})();
+</script>
+</body>
+</html>
